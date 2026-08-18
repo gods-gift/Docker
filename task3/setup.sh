@@ -3,8 +3,12 @@
 ## You need to modify this as per your system, 
 ## This should be the interface of your system connecting 
 ## to internet. 
-DEFAULT_IFC=enp0s1 
+##DEFAULT_IFC=enp0s1
+##preet
+DEFAULT_IFC=enp0s3
 
+##preet
+current_layer=
 
 # These are the configuration files that you may modify
 IP4_SUBNET=192.168

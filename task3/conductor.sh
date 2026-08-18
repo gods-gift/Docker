@@ -54,6 +54,8 @@ wait_for_dev() {
 process_instruction() {
     local instruction="$1"
     local parent_layers="$2"
+
+    # echo "[Veenu]ins is $instruction"
     
     # Extract command type (first word)
     local cmd_type="${instruction%% *}"
@@ -98,6 +100,7 @@ handle_run() {
     local command="$1"
     local parent_layers="$2"
     local parent_hash=$(get_layer_hash "$parent_layers")
+    # echo "[Veenu]command in run is $command"
     
     # Generate unique hash for this command
     local cmd_hash=$(echo "$command" | sha256sum | cut -d' ' -f1)
@@ -106,24 +109,37 @@ handle_run() {
     # Check cache
     if [ -d "$CACHEDIR/layers/$layer_hash" ]; then
         echo "Using cached RUN layer: $layer_hash"
-        current_layer="$CACHEDIR/layers/$layer_hash/diff"
+        current_layer="$CACHEDIR/layers/$layer_hash"
         return
     fi
     
     # Subtask 3.f.1
     # Create new layer
+    local new_layer="$CACHEDIR/layers/$layer_hash"
+    mkdir -p "$new_layer/diff" "$new_layer/work"
     
 
     # Subtask 3.f.2
     # Temporarily mount the overlay filesystem
-    
+    local mount_dir="$new_layer/merged"
+    mkdir -p "$mount_dir"
+    mount -t overlay overlay \
+        -o lowerdir="$parent_layers",upperdir="$new_layer/diff",workdir="$new_layer/work" \
+        "$mount_dir"
 
     # Subtask 3.f.3
     # Execute the command in the new mount
+    chroot "$mount_dir" /bin/sh -c "$command"
 
     
     # Subtask 3.f.4
     # Cleanup and record metadata
+    umount "$mount_dir"
+
+    echo "RUN $command" > "$CACHEDIR/layers/$layer_hash/metadata"
+    echo "$parent_hash" > "$CACHEDIR/layers/$layer_hash/parent"
+    current_layer="$CACHEDIR/layers/$layer_hash"
+    echo "$current_layer" > "$CACHEDIR/layers/.last_layer"
     
 }
 
@@ -136,7 +152,8 @@ handle_copy() {
     local args="$1"
     local parent_layers="$2"
     local parent_hash=$(get_layer_hash "$parent_layers")
-    
+    # echo "[Veenu] parent hash : $parent_hash"
+
     # Parse COPY arguments
     IFS=' ' read -r src dest <<< "$args"
     [ -z "$src" ] && die "COPY requires source path"
@@ -145,29 +162,39 @@ handle_copy() {
     # Generate content hash
     local content_hash=$(find "$src" -type f -exec sha256sum {} + | sha256sum | cut -d' ' -f1)
     local layer_hash=$(echo "COPY-${parent_hash}-${content_hash}" | sha256sum | cut -d' ' -f1)
-
+    # echo "[Veenu]CACHEDIR is $CACHEDIR"
     # Lesson: Check in the cache if the layer exists
     if [ -d "$CACHEDIR/layers/$layer_hash" ]; then
         echo "Using cached COPY layer: $layer_hash"
-        current_layer="$CACHEDIR/layers/$layer_hash/diff"
+        current_layer="$CACHEDIR/layers/$layer_hash"
         return
     fi
     
     # Subtask 3.e.1
     # Create a new layer
+    # echo "[Veenu]creating new layer with layer hash as $layer_hash"
+    local new_layer="$CACHEDIR/layers/$layer_hash"
+    mkdir -p "$new_layer/diff" "$new_layer/work"
 
 
     # Subtask 3.e.2
     # Temporarily mount the overlay filesystem
+     local mount_dir="$new_layer/merged"
+    mkdir -p "$mount_dir"
+    mount -t overlay overlay \
+        -o lowerdir="$parent_layers",upperdir="$new_layer/diff",workdir="$new_layer/work" \
+        "$mount_dir"
 
     
     # Subtask 3.e.3
     # Copy the files from source to destination
+    cp -r "$src" "$mount_dir/$dest"
+
 
     
     # Subtask 3.e.4
     # Unmount the overlay filesystem
-
+    umount "$mount_dir"
 
     # Record metadata and parent layer
     echo "COPY $src $dest" > "$CACHEDIR/layers/$layer_hash/metadata"
@@ -209,25 +236,27 @@ build() {
     fi
 
     # Remove on implementation of 3.d.1 <---
-    cp -a "$CACHEDIR/base/$BASE_NAME/" "$IMAGEDIR/$NAME"
-    echo -e "\e[1;32mImage $NAME built without any layers\e[0m"
+    # cp -a "$CACHEDIR/base/$BASE_NAME/" "$IMAGEDIR/$NAME"
+    # echo -e "\e[1;32mImage $NAME built without any layers\e[0m"
     # Remove on implementation of 3.d.1 <---
 
     # # Subtask 3.d.1 - start 
     # # Uncomment the below code to implement layering
     # # Store the base layer and the layer stack in the image directory to be used later
-    # local BASE_LAYER=$"$CACHEDIR/base/$BASE_NAME"
-    # local LAYER_STACK="$BASE_LAYER"
+    local BASE_LAYER=$"$CACHEDIR/base/$BASE_NAME"
+    local LAYER_STACK="$BASE_LAYER"
+    # echo "base_layer $BASE_LAYER"
+    # echo "LAYER stack $LAYER_STACK"
     
-    # # For subtask 3.e and 3.f
-    # while IFS= read -r instruction; do
-    #     process_instruction "$instruction" "$LAYER_STACK"
-    #     LAYER_STACK=$(update_layer_stack "$current_layer/diff" "$LAYER_STACK")
-    # done < <(grep -E '^(RUN|COPY)' "$CONDUCTORFILE")
+    # For subtask 3.e and 3.f
+    while IFS= read -r instruction; do
+        process_instruction "$instruction" "$LAYER_STACK"
+        LAYER_STACK=$(update_layer_stack "$current_layer/diff" "$LAYER_STACK")
+    done < <(grep -E '^(RUN|COPY)' "$CONDUCTORFILE")
     
-    # mkdir -p "$IMAGEDIR/$NAME"
-    # echo "$LAYER_STACK" > "$IMAGEDIR/$NAME/layers"
-    # echo -e "\e[1;32mImage ${NAME:-} built with $(( $(echo "${LAYER_STACK}" | tr -dc ':' | wc -c) + 1 )) layers\e[0m"
+    mkdir -p "$IMAGEDIR/$NAME"
+    echo "$LAYER_STACK" > "$IMAGEDIR/$NAME/layers"
+    echo -e "\e[1;32mImage ${NAME:-} built with $(( $(echo "${LAYER_STACK}" | tr -dc ':' | wc -c) + 1 )) layers\e[0m"
     # # Subtask 3.d.1 - end
 }
 
@@ -248,6 +277,7 @@ images() {
 
 # This function deletes a container image
 remove_image() {
+    echo "inside image removal"
     local NAME=${1:-}
     [ -z "$NAME" ] && die "Image name is required"
     [ -d "$IMAGEDIR/$NAME" ] || die "Image $NAME does not exist"
@@ -304,24 +334,50 @@ run() {
     [ -d "$CONTAINERDIR/$NAME" ] && die "Container $NAME already exists"
 
     # Remove on implementation of 3.d.2 <---
-    mkdir -p "$CONTAINERDIR/$NAME/rootfs"
-    cp -a "$IMAGEDIR/$IMAGE"/* "$CONTAINERDIR/$NAME/rootfs"
+    # echo "container dir $CONTAINERDIR / $NAME / rootfs"
+    # echo "image dir $IMAGEDIR/$IMAGE"
+
+    # mkdir -p "$CONTAINERDIR/$NAME/rootfs"
+    # cp -a "$IMAGEDIR/$IMAGE"/* "$CONTAINERDIR/$NAME/rootfs"
     # Remove on implementation of 3.d.2 <---
 
     # Subtask 3.d.2 - start
     # Create a new directory for the container rootfs
+    mkdir -p "$CONTAINERDIR/$NAME/upper"
+    mkdir -p "$CONTAINERDIR/$NAME/work"
+    mkdir -p "$CONTAINERDIR/$NAME/merged"
+
     # Read the layer stack from the image directory and mount the overlay filesystem
-    
+    LAYER_PATH=$(cat "$IMAGEDIR/$IMAGE/layers")
+    # echo "layerpath is $LAYER_PATH"
+
+    mount -t overlay overlay \
+    -o lowerdir="$LAYER_PATH",upperdir="$CONTAINERDIR/$NAME/upper",workdir="$CONTAINERDIR/$NAME/work" \
+    "$CONTAINERDIR/$NAME/merged"
+
     
     # Subtask 3.d.2 - end
 
     shift 2
     # this is the init command that should be run within the container
     local INIT_CMD_ARGS=${@:-/bin/bash} # if no command is given, then substitute by /bin/bash
-
+    # echo "init command args is $INIT_CMD_ARGS and Detach is $DETACH"
+    # DETACH=""
+    # for i in "${!INIT_CMD_ARGS[@]}"; do
+    #     if [[ "${INIT_CMD_ARGS[$i]}" == "-d" ]]; then
+    #         DETACH="&"
+    #         unset 'INIT_CMD_ARGS[$i]'  # Remove -d from the arguments
+    #     fi
+    # done
     # Subtask 3.a.1
     # You should bind mount /dev within the container root fs
+    CONTAINER_ROOTFS="$CONTAINERDIR/$NAME/merged"
+    sudo chmod 755 $CONTAINER_ROOTFS
 
+    mount --bind /dev "$CONTAINER_ROOTFS/dev"
+
+
+    # echo "[Veenu]Mounted /dev into $CONTAINER_ROOTFS/dev"
     # Subtask 3.d.3
     # Modify subtask 3.a.1 to bind mount /dev
 
@@ -333,6 +389,40 @@ run() {
     # - When unshare process exits all of its children also exit (--kill-child option)
     # - permission of root dir within container should be set to 755 for apt to work correctly
     # - $INIT_CMD_ARGS should be the entry program for the container
+    
+    # echo "[Veenu] Mounting /proc and /sys in container..."
+    #     mkdir -p "$CONTAINERDIR/$NAME/merged/proc"
+    # mkdir -p "$CONTAINERDIR/$NAME/merged/sys"
+
+# mount -t proc proc $CONTAINER_ROOTFS/proc
+# mount -t sysfs sys $CONTAINER_ROOTFS/sys
+
+# echo "[Veenu] Starting container with isolated namespaces..."
+
+# Unshare to isolate namespaces and chroot into container
+# unshare --uts --pid --net --mount --ipc --fork --kill-child --mount-proc chroot $CONTAINER_ROOTFS /bin/bash -c "
+#         mount -t proc proc /proc
+#         mount -t proc sys /sys
+#         $INIT_CMD_ARGS
+#     " 
+eval "unshare --uts --pid --net --mount --ipc --fork --kill-child \
+        chroot $CONTAINER_ROOTFS /bin/bash -c '
+        mount -t proc proc /proc
+        mount -t sysfs sys /sys
+        env -i $INIT_CMD_ARGS
+    ' $DETACH"
+    
+    # echo "[Veenu]Starting container with isolated namespaces..."
+
+    # sudo unshare --uts --pid --net --mount --ipc --fork  --kill-child bash -c "
+    
+    # # Mount /proc and /sys inside the container rootfs (reflects new namespace)
+    # mount -t proc proc $CONTAINER_ROOTFS/proc
+    # mount -t sysfs sys $CONTAINER_ROOTFS/sys
+
+    # # Switch root and launch bash
+    # exec chroot $CONTAINER_ROOTFS $INIT_CMD_ARGS"
+
 
     # Subtask 3.d.3
     # Modify subtask 3.a.2 to use the overlay filesystem
@@ -368,7 +458,7 @@ stop() {
     # Subtask 3.d.3
     # Modify the below code to use the overlay filesystem
     # Lesson: Getting the pid of the entry process within the container
-    local PID=$(ps -ef | grep "$CONTAINERDIR/$NAME/rootfs" | grep -v grep | awk '{print $2}')
+    local PID=$(ps -ef | grep "$CONTAINERDIR/$NAME/merged" | grep -v grep | awk '{print $2}')
     
 
     # Lesson: Delete the ip link created in host for the container
@@ -383,12 +473,14 @@ stop() {
     # Modify the below code to use the overlay filesystem
     # This is a comprehensive list of unmounts
     # You can remove any if not required depending on how you mounted them
-    umount "$CONTAINERDIR/$NAME/rootfs/proc" > /dev/null 2>&1 || :
-    umount "$CONTAINERDIR/$NAME/rootfs/sys" > /dev/null 2>&1 || :
-    umount "$CONTAINERDIR/$NAME/rootfs/dev" > /dev/null 2>&1 || :
+    umount "$CONTAINERDIR/$NAME/merged/proc" > /dev/null 2>&1 || :
+    umount "$CONTAINERDIR/$NAME/merged/sys" > /dev/null 2>&1 || :
+    umount "$CONTAINERDIR/$NAME/merged/dev" > /dev/null 2>&1 || :
 
     # Subtask 3.d.4
     # Unmount the overlay filesystem
+    umount "$CONTAINERDIR/$NAME/merged" > /dev/null 2>&1 || :
+
     
     # Deletes the container file
     rm -rf "$CONTAINERDIR/$NAME"
@@ -409,6 +501,7 @@ exec() {
 
     # if no command is given then substitute with /bin/bash
     local EXEC_CMD_ARGS=${@:-/bin/bash}
+    # echo "EXEC CMD ARGS $EXEC_CMD_ARGS"
 
     [ -d "$CONTAINERDIR/$NAME" ] || die "Container $NAME does not exist"
     echo -e "\e[1;32mExecuting $CMD in $NAME container!\e[0m"
@@ -416,11 +509,12 @@ exec() {
     # Subtask 3.d.3
     # Modify the below code to use the overlay filesystem
     # This is the PID of the unshare process for the given container
-    local UNSHARE_PID=$(ps -ef | grep "$CONTAINERDIR/$NAME/rootfs" | grep -v grep | awk '{print $2}')
+    local UNSHARE_PID=$(ps -ef | grep "$CONTAINERDIR/$NAME/merged" | grep -v grep | awk '{print $2}')
     [ -z "$UNSHARE_PID" ] && die "Cannot find container process"
 
     # This is the PID of the process that unshare executed within the container
     local CONTAINER_INIT_PID=$(pgrep -P $UNSHARE_PID | head -1)
+    # echo "PID of the process that unshare executed within the container $CONTAINER_INIT_PID"
     [ -z "$CONTAINER_INIT_PID" ] && die "Cannot find container process"
 
     # Subtask 3.b.1
@@ -430,6 +524,45 @@ exec() {
     # The executed process should be within correct namespace and root
     # directory as of the container and tools like ps, top should show only processes
     # running within the container
+
+    # nsenter --target $CONTAINER_INIT_PID --all $EXEC_CMD_ARGS
+#     nsenter \
+#   --mount="/proc/$CONTAINER_INIT_PID/ns/mnt" \
+#   --pid="/proc/$CONTAINER_INIT_PID/ns/pid" \
+#   --uts="/proc/$CONTAINER_INIT_PID/ns/uts" \
+#   --net="/proc/$CONTAINER_INIT_PID/ns/net" \
+#   --ipc="/proc/$CONTAINER_INIT_PID/ns/ipc" \
+#   --target $CONTAINER_INIT_PID  \
+#   -r
+#   /bin/bash
+    # CONTAINER_ROOTFS="$CONTAINERDIR/$NAME/rootfs"
+
+#     sudo nsenter \
+#   --target $CONTAINER_INIT_PID \
+#   --uts --net --mount --ipc --pid \
+#   /bin/bash
+
+#   nsenter --pid=/proc/${CONTAINER_INIT_PID}/ns/pid \
+#   --pid="/proc/${CONTAINER_INIT_PID}/ns/pid" \
+#   --uts="/proc/${CONTAINER_INIT_PID}/ns/uts" \
+#   --net="/proc/${CONTAINER_INIT_PID}/ns/net" \
+#   --mount="/proc/${CONTAINER_INIT_PID}/ns/mnt" \
+#   --ipc="/proc/${CONTAINER_INIT_PID}/ns/ipc" \
+#   unshare -f --mount-proc=$CONTAINERDIR/$NAME/rootfs/proc chroot $CONTAINER_ROOTFS /bin/bash
+
+# mkdir -p "$CONTAINERDIR/$NAME/rootfs/proc"
+
+# nsenter --pid=/proc/${CONTAINER_INIT_PID}/ns/pid \
+#   unshare -f --mount-proc=$CONTAINERDIR/$NAME/rootfs/proc chroot $CONTAINER_ROOTFS /bin/bash
+#    echo " before nsenter detach is $DETACH"
+    
+    # eval "nsenter --target ${CONTAINER_INIT_PID} --all  --root --wdns="/" env -i $EXEC_CMD_ARGS $DETACH"
+
+if [ -n "$DETACH" ]; then
+    (nsenter --target ${CONTAINER_INIT_PID} --all --root --wdns="/" env -i $EXEC_CMD_ARGS > /dev/null 2>&1 &)
+else
+    nsenter --target ${CONTAINER_INIT_PID} --all --root --wdns="/" env -i $EXEC_CMD_ARGS
+fi
 
 
 }
@@ -462,7 +595,7 @@ addnetwork() {
 
     # Subtask 3.d.3
     # Modify the below code to use the overlay filesystem (Use only one pid)
-    local PID=$(ps -ef | grep "$CONTAINERDIR/$NAME/rootfs" | grep -v grep | awk '{print $2}')
+    local PID=$(ps -ef | grep "$CONTAINERDIR/$NAME/merged" | grep -v grep | awk '{print $2}')
 
     local CONDUCTORNS="/proc/$PID/ns/net"
     local NSDIR=$NETNSDIR/$NAME
@@ -483,6 +616,14 @@ addnetwork() {
     INSIDE_PEER="${NAME}-inside"
     OUTSIDE_PEER="${NAME}-outside"
 
+    # echo "INSIDE_IP4 $INSIDE_IP4"
+    #     echo "OUTSIDE_IP4 $OUTSIDE_IP4"
+    #         echo "INSIDE_PEER $INSIDE_PEER"
+    #             echo "OUTSIDE_PEER $OUTSIDE_PEER"
+
+
+
+
     # Subtask 3.c.1
     # Add a veth links (It is a peer link connecting two points) connecting the container's network 
     # namespace to the root(host) namespace. The veth link will have two interfaces.
@@ -490,11 +631,44 @@ addnetwork() {
     # OUTSIDE_PEER interface
     # You should use iproute2 tool (ip command)
 
+    #Veenu getting the container_pid
+    local UNSHARE_PID=$(ps -ef | grep "$CONTAINERDIR/$NAME/merged" | grep -v grep | awk '{print $2}')
+    [ -z "$UNSHARE_PID" ] && die "Cannot find container process"
+
+    # This is the PID of the process that unshare executed within the container
+    local CONTAINER_INIT_PID=$(pgrep -P $UNSHARE_PID | head -1)
+    # echo "PID of the process that unshare executed within the container $CONTAINER_INIT_PID"
+    [ -z "$CONTAINER_INIT_PID" ] && die "Cannot find container process"
+
+    # echo "networkadd before"
+
+    if ip link show $OUTSIDE_PEER  &>/dev/null; then
+        ip link del $OUTSIDE_PEER 
+    fi
+
+    # echo "networkadd"
+    ip link add $OUTSIDE_PEER type veth peer name $INSIDE_PEER
+    # echo "networkadd1"
+
+    ip addr flush dev $OUTSIDE_PEER 2>/dev/null
+    # echo "networkadd2"
+
+    # ip addr add $OUTSIDE_IP4/24 dev $OUTSIDE_PEER
+    ip link set $OUTSIDE_PEER up
+        # echo "networkadd3"
+
+
+    # Move the INSIDE_PEER into the container's network namespace
+    ip link set $INSIDE_PEER netns $CONTAINER_INIT_PID
+    ip -n $NAME link set $INSIDE_PEER up
+    ip -n $NAME link set lo up
+
+
+# ip netns exec $CONTAINER_INIT_PID ip link set $INSIDE_PEER up
 
     # Lesson: By default linux does not forward packets, it only acts as an end host
     # We need to enable packet forwarding capability to forward packets to our containers
     echo 1 > /proc/sys/net/ipv4/ip_forward
-
     # Subtask 3.c.2
     # Enable the interfaces that you have created within the host and the container
     # You should also enable lo interface within the container (which is disabled by default)
@@ -612,20 +786,25 @@ usage() {
     exit 1
 }
 
-OPTS="hie:"
-LONGOPTS="help,internet,expose:"
+OPTS="dhie:"
+LONGOPTS="detach,help,internet,expose:"
 
 OPTIONS=$(getopt -o "$OPTS" --long "$LONGOPTS" -- "$@")
 [ "$?" -ne "0" ] && usage >&2 || true
 
 eval set -- "$OPTIONS"
+# echo "options are $OPTIONS"
 
+DETACH=""
 
 while true; do
     arg="$1"
     shift
 
-    case "$arg" in
+        case "$arg" in
+            -d | --detach)
+                DETACH="&"
+            ;;
         -h | --help)
             usage full >&2
             ;;
