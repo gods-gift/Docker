@@ -13,7 +13,7 @@ This assignment explores Linux container primitives from the ground up — names
 ## Repository Structure
 
 ```
-24m2117_assignment3/
+24m2135_assignment3/
 ├── task1/
 │   ├── namespace_prog.c        # Namespace isolation with clone/setns
 │   └── namespace_prog          # Compiled binary
